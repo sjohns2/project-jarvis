@@ -14,6 +14,13 @@ Phase 2.0 Enhancements:
 - Parallel agent execution with asyncio.gather()
 - Dynamic prompt loading from bmad-integration/agents/
 - Graceful fallback to simulation mode
+
+Phase 2.1 Enhancements (Claude Skills + Prompt Caching):
+- Claude Skills format for progressive loading
+- Anthropic prompt caching (90% cost reduction on agent prompts!)
+- System prompts with cache control
+- Backward compatibility with Phase 2.0 prompts
+- Cache performance logging
 """
 
 import asyncio
@@ -72,6 +79,14 @@ class JARVIS:
     - Cost-optimized model selection (Haiku 4.5 vs Sonnet 4.5)
     - Response caching to reduce API calls
     - Smart complexity detection
+
+    Phase 2.0 Features:
+    - Real agent spawning with specialized prompts
+    - Parallel agent execution
+
+    Phase 2.1 Features:
+    - Claude Skills with prompt caching (90% cost savings)
+    - Backward compatible with Phase 2.0 prompts
     """
 
     def __init__(self, user_name: str = None):
@@ -309,7 +324,7 @@ class JARVIS:
                 "timestamp": datetime.now().isoformat()
             }
 
-    async def _call_claude_api(self, prompt: str, complexity: float = 0.5, max_tokens: int = 500) -> Optional[str]:
+    async def _call_claude_api(self, prompt: str, complexity: float = 0.5, max_tokens: int = 500, system_prompt: Optional[str] = None, enable_prompt_caching: bool = False) -> Optional[str]:
         """
         Call Claude API with smart model selection and caching.
 
@@ -317,6 +332,8 @@ class JARVIS:
             prompt: The prompt to send to Claude
             complexity: Task complexity (0.0-1.0)
             max_tokens: Maximum tokens in response
+            system_prompt: Optional system prompt (for agent prompts with caching)
+            enable_prompt_caching: Enable Anthropic prompt caching (90% cost reduction)
 
         Returns:
             Response text or None if error
@@ -327,8 +344,8 @@ class JARVIS:
         # Select model based on complexity
         model = self._select_model(complexity)
 
-        # Check cache
-        cache_key = self._get_cache_key(prompt, model)
+        # Check our local cache (Phase 1.5 feature)
+        cache_key = self._get_cache_key(f"{system_prompt or ''}{prompt}", model)
         cached_response = self._get_cached_response(cache_key)
         if cached_response:
             return cached_response
@@ -336,28 +353,64 @@ class JARVIS:
         # Make API call
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
+                # Build headers
+                headers = {
+                    "x-api-key": self.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
+
+                # Add prompt caching beta header if enabled
+                if enable_prompt_caching:
+                    headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+
+                # Build request payload
+                payload = {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "messages": [{
+                        "role": "user",
+                        "content": prompt
+                    }]
+                }
+
+                # Add system prompt with caching if provided
+                if system_prompt:
+                    if enable_prompt_caching:
+                        # Use prompt caching for system prompt (90% cost reduction!)
+                        payload["system"] = [
+                            {
+                                "type": "text",
+                                "text": system_prompt,
+                                "cache_control": {"type": "ephemeral"}
+                            }
+                        ]
+                    else:
+                        # No caching
+                        payload["system"] = system_prompt
+
                 response = await client.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.anthropic_api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json"
-                    },
-                    json={
-                        "model": model,
-                        "max_tokens": max_tokens,
-                        "messages": [{
-                            "role": "user",
-                            "content": prompt
-                        }]
-                    }
+                    headers=headers,
+                    json=payload
                 )
 
                 if response.status_code == 200:
                     result = response.json()
                     content = result["content"][0]["text"]
 
-                    # Cache the response
+                    # Log cache performance if prompt caching is used
+                    if enable_prompt_caching and "usage" in result:
+                        usage = result["usage"]
+                        cache_read = usage.get("cache_read_input_tokens", 0)
+                        cache_creation = usage.get("cache_creation_input_tokens", 0)
+
+                        if cache_read > 0:
+                            logger.info(f"Prompt cache HIT: {cache_read} tokens read from cache (90% cost savings!)")
+                        elif cache_creation > 0:
+                            logger.info(f"Prompt cache MISS: {cache_creation} tokens cached for future use")
+
+                    # Cache the response in our local cache
                     self._cache_response(cache_key, content, model)
 
                     return content
@@ -644,37 +697,62 @@ Return ONLY valid JSON in this exact format:
 
         return None
 
-    async def _load_ring_prompt(self, prompt_path: str) -> Optional[str]:
+    async def _load_ring_skill(self, ring_id: str) -> Optional[str]:
         """
-        Load a ring's specialized prompt from the filesystem.
+        Load a ring's Claude Skill from the filesystem (Phase 2.1).
 
         Args:
-            prompt_path: Path to the ring's prompt file (e.g., /app/bmad-integration/agents/vilya.md)
+            ring_id: The ring's ID (e.g., 'vilya', 'nenya', 'narya')
+
+        Returns:
+            The skill content or None if file doesn't exist
+        """
+        try:
+            # Phase 2.1: Load from .claude/skills/ directory
+            skill_path = f".claude/skills/{ring_id}-{'architect' if ring_id == 'vilya' else 'pm' if ring_id == 'nenya' else 'analyst'}/SKILL.md"
+
+            # Try to read the skill file
+            with open(skill_path, 'r', encoding='utf-8') as f:
+                skill_content = f.read()
+                logger.info(f"Loaded {ring_id} skill from {skill_path} ({len(skill_content)} chars)")
+                return skill_content
+        except FileNotFoundError:
+            logger.warning(f"Skill not found at {skill_path}, trying legacy prompt...")
+            # Fallback to Phase 2.0 prompts
+            return await self._load_legacy_ring_prompt(ring_id)
+        except Exception as e:
+            logger.error(f"Error loading ring skill: {e}")
+            return None
+
+    async def _load_legacy_ring_prompt(self, ring_id: str) -> Optional[str]:
+        """
+        Load a ring's Phase 2.0 prompt (legacy fallback).
+
+        Args:
+            ring_id: The ring's ID
 
         Returns:
             The prompt content or None if file doesn't exist
         """
         try:
-            # Convert Docker path to local path if needed
-            local_path = prompt_path.replace("/app/", "")
+            legacy_path = f"bmad-integration/agents/{ring_id}.md"
 
-            # Try to read the file
-            with open(local_path, 'r', encoding='utf-8') as f:
+            with open(legacy_path, 'r', encoding='utf-8') as f:
                 prompt_content = f.read()
-                logger.info(f"Loaded ring prompt from {local_path} ({len(prompt_content)} chars)")
+                logger.info(f"Loaded legacy prompt from {legacy_path} ({len(prompt_content)} chars)")
                 return prompt_content
         except FileNotFoundError:
-            logger.error(f"Ring prompt not found at {local_path}")
+            logger.error(f"Legacy prompt not found at {legacy_path}")
             return None
         except Exception as e:
-            logger.error(f"Error loading ring prompt: {e}")
+            logger.error(f"Error loading legacy prompt: {e}")
             return None
 
     async def _forge_ring(self, ring: Ring, task: str, knowledge: Optional[Dict]) -> str:
         """
-        Forge (spawn) a real agent using Claude API with the ring's specialized prompt.
+        Forge (spawn) a real agent using Claude API with the ring's specialized skill.
 
-        This is Phase 2.0 - real agent spawning!
+        Phase 2.1 Enhancement: Uses Claude Skills with prompt caching for 90% cost savings!
 
         Args:
             ring: The Ring (agent) to forge
@@ -686,15 +764,15 @@ Return ONLY valid JSON in this exact format:
         """
         logger.info(f"Forging ring: {ring.name} ({ring.role})")
 
-        # Step 1: Load the ring's specialized prompt
-        ring_prompt = await self._load_ring_prompt(ring.prompt_path)
+        # Step 1: Load the ring's Claude Skill (Phase 2.1)
+        ring_skill = await self._load_ring_skill(ring.id)
 
-        if not ring_prompt:
-            # Fallback to simulation if prompt not found
-            logger.warning(f"Could not load prompt for {ring.name}, falling back to simulation")
+        if not ring_skill:
+            # Fallback to simulation if skill not found
+            logger.warning(f"Could not load skill for {ring.name}, falling back to simulation")
             return await self._simulate_ring_analysis(ring, task, knowledge)
 
-        # Step 2: Build the context for the agent
+        # Step 2: Build the user prompt with context
         context_parts = [f"**User Request:** {task}"]
 
         if knowledge and knowledge.get("results"):
@@ -704,22 +782,17 @@ Return ONLY valid JSON in this exact format:
                 content = result.get("content", "")[:500]  # First 500 chars
                 context_parts.append(f"\n- **{title}**\n  {content}...")
 
+        context_parts.append(f"\n\nPlease provide a comprehensive analysis following your role as {ring.role}.")
         user_prompt = "\n".join(context_parts)
 
-        # Step 3: Call Claude API with the ring's specialized prompt
-        # Use Sonnet 4.5 for agent execution (complex task)
-        full_prompt = f"""{ring_prompt}
-
----
-
-{user_prompt}
-
-Please provide a comprehensive analysis following your role as {ring.role}."""
-
+        # Step 3: Call Claude API with skill as system prompt + prompt caching
+        # This gives us 90% cost reduction on the skill content!
         response = await self._call_claude_api(
-            prompt=full_prompt,
-            complexity=0.9,  # Agent tasks are complex - use Sonnet
-            max_tokens=4000  # Allow longer responses for detailed analysis
+            prompt=user_prompt,
+            complexity=0.9,  # Agent tasks are complex - use Sonnet 4.5
+            max_tokens=4000,  # Allow longer responses for detailed analysis
+            system_prompt=ring_skill,  # Skill goes in system prompt
+            enable_prompt_caching=True  # 90% cost savings!
         )
 
         if response:

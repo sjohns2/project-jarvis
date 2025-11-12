@@ -125,6 +125,54 @@ All the same as [Archon](README.md), plus:
 → Greets you and reports system status
 ```
 
+### How Phase 2.0 Works (Real Agent Spawning)
+
+When you ask JARVIS to do something complex:
+
+1. **Intent Interpretation** (Haiku 4.5)
+   - JARVIS analyzes your command
+   - Determines which specialist agent(s) to deploy
+   - Assesses task complexity
+
+2. **Knowledge Gathering**
+   - Queries Archon knowledge base for relevant context
+   - Extracts top 3 most relevant documents
+   - Prepares context for the agent
+
+3. **Agent Forging** (Sonnet 4.5)
+   - Loads specialist prompt from `bmad-integration/agents/`
+   - Combines: Agent expertise + Your task + Knowledge context
+   - Spawns Claude agent with 4000 token budget
+
+4. **Parallel Execution** (if multiple agents)
+   - Uses `asyncio.gather()` for simultaneous execution
+   - All agents work in parallel for speed
+   - Example: Nenya, Vilya, and Narya all analyze together
+
+5. **Response Delivery**
+   - JARVIS presents the agent's detailed analysis
+   - Voice synthesis speaks the response
+   - Full details logged for reference
+
+**Example Flow:**
+```
+You: "JARVIS, design an auth system for my Next.js app"
+
+→ JARVIS selects Vilya (System Architect)
+→ Queries knowledge base for "Next.js authentication"
+→ Loads Vilya's 7,000 char expert prompt
+→ Vilya analyzes:
+   • Reviews Next.js 15 architecture
+   • Evaluates NextAuth vs Clerk vs Supabase
+   • Designs database schema
+   • Plans API routes
+   • Considers security
+   • Provides implementation steps
+
+→ Returns 2,000+ char detailed architecture plan
+→ JARVIS speaks the summary via voice
+```
+
 ---
 
 ## 🎭 JARVIS Personality
@@ -353,23 +401,28 @@ Edit `python/src/jarvis/personality.py` to customize:
 - Response caching (1 hour TTL)
 - Cost tracking and monitoring
 - Real-time cost statistics API
-- **Result: ~90% cost reduction vs Sonnet-only**
+- **Result: ~72% cost reduction vs Sonnet-only**
 
-### 🔄 Simulated (Phase 2)
+### ✅ Phase 2.0 (Real Agent Spawning) 🎉
 
-- Agent spawning (simulated responses for now)
-- Full BMAD integration
-- Task creation
-- Proactive monitoring
+- **Real agent deployment** - Agents actually analyze and respond (not simulated!)
+- **Specialized prompts** - Each ring has expert-level knowledge in their domain
+- **Parallel execution** - Multiple agents work simultaneously with asyncio
+- **Knowledge integration** - Agents receive relevant context from knowledge base
+- **Graceful fallback** - Simulation mode if prompts missing or API fails
+- **3 Specialist Rings:**
+  - **Vilya** (System Architect) - 7,000+ char expert prompt
+  - **Nenya** (Product Manager) - 6,000+ char expert prompt
+  - **Narya** (Research Analyst) - 6,500+ char expert prompt
 
 ---
 
-## 🚧 Phase 2 Roadmap
+## 🚧 Phase 2.1+ Roadmap
 
-1. **Full Agent Spawning**
-   - Real agent deployment via Agent Work Orders
-   - Parallel ring coordination
-   - Result synthesis
+1. **Enhanced Agent Capabilities**
+   - Result synthesis when multiple agents respond
+   - Agent-to-agent communication
+   - Iterative refinement loops
 
 2. **Enhanced Intelligence**
    - Context-aware conversations

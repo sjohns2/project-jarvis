@@ -8,6 +8,12 @@ Phase 1.5 Enhancements:
 - Smart model selection (Haiku 4.5 for most tasks, Sonnet 4.5 for complex tasks)
 - Response caching to reduce API costs
 - Cost tracking and optimization
+
+Phase 2.0 Enhancements:
+- Real agent spawning with specialized prompts
+- Parallel agent execution with asyncio.gather()
+- Dynamic prompt loading from bmad-integration/agents/
+- Graceful fallback to simulation mode
 """
 
 import asyncio
@@ -579,15 +585,32 @@ Return ONLY valid JSON in this exact format:
             except Exception as e:
                 logger.warning(f"Could not query knowledge base: {e}")
 
-        # Step 4: For Phase 1, return a simulated response
-        # In Phase 2, we'll actually forge the rings via agent work orders
+        # Step 4: Forge the rings! (Phase 2.0 - Real Agent Spawning)
 
         response_parts = [ack_msg, forge_msg]
 
-        # Simulate ring analysis
-        for ring in rings_to_forge:
-            analysis = await self._simulate_ring_analysis(ring, text, knowledge_context)
+        # Forge rings (spawn real agents with specialized prompts)
+        if len(rings_to_forge) == 1:
+            # Single agent - forge sequentially
+            ring = rings_to_forge[0]
+            analysis = await self._forge_ring(ring, text, knowledge_context)
             response_parts.append(f"\n\n**{ring.name} ({ring.role}) Analysis:**\n{analysis}")
+        else:
+            # Multiple agents - forge in parallel for speed
+            logger.info(f"Forging {len(rings_to_forge)} rings in parallel")
+
+            # Create tasks for parallel execution
+            forge_tasks = [
+                self._forge_ring(ring, text, knowledge_context)
+                for ring in rings_to_forge
+            ]
+
+            # Execute all agents in parallel
+            analyses = await asyncio.gather(*forge_tasks)
+
+            # Add all analyses to response
+            for ring, analysis in zip(rings_to_forge, analyses):
+                response_parts.append(f"\n\n**{ring.name} ({ring.role}) Analysis:**\n{analysis}")
 
         response_parts.append(
             f"\n\n{self.personality.complete()} Would you like me to proceed with implementation, {self.user_name}?"
@@ -621,10 +644,100 @@ Return ONLY valid JSON in this exact format:
 
         return None
 
+    async def _load_ring_prompt(self, prompt_path: str) -> Optional[str]:
+        """
+        Load a ring's specialized prompt from the filesystem.
+
+        Args:
+            prompt_path: Path to the ring's prompt file (e.g., /app/bmad-integration/agents/vilya.md)
+
+        Returns:
+            The prompt content or None if file doesn't exist
+        """
+        try:
+            # Convert Docker path to local path if needed
+            local_path = prompt_path.replace("/app/", "")
+
+            # Try to read the file
+            with open(local_path, 'r', encoding='utf-8') as f:
+                prompt_content = f.read()
+                logger.info(f"Loaded ring prompt from {local_path} ({len(prompt_content)} chars)")
+                return prompt_content
+        except FileNotFoundError:
+            logger.error(f"Ring prompt not found at {local_path}")
+            return None
+        except Exception as e:
+            logger.error(f"Error loading ring prompt: {e}")
+            return None
+
+    async def _forge_ring(self, ring: Ring, task: str, knowledge: Optional[Dict]) -> str:
+        """
+        Forge (spawn) a real agent using Claude API with the ring's specialized prompt.
+
+        This is Phase 2.0 - real agent spawning!
+
+        Args:
+            ring: The Ring (agent) to forge
+            task: The user's task for this agent
+            knowledge: Optional knowledge base context
+
+        Returns:
+            The agent's detailed analysis/response
+        """
+        logger.info(f"Forging ring: {ring.name} ({ring.role})")
+
+        # Step 1: Load the ring's specialized prompt
+        ring_prompt = await self._load_ring_prompt(ring.prompt_path)
+
+        if not ring_prompt:
+            # Fallback to simulation if prompt not found
+            logger.warning(f"Could not load prompt for {ring.name}, falling back to simulation")
+            return await self._simulate_ring_analysis(ring, task, knowledge)
+
+        # Step 2: Build the context for the agent
+        context_parts = [f"**User Request:** {task}"]
+
+        if knowledge and knowledge.get("results"):
+            context_parts.append("\n**Knowledge Base Context:**")
+            for result in knowledge["results"][:3]:  # Top 3 results
+                title = result.get("title", "Untitled")
+                content = result.get("content", "")[:500]  # First 500 chars
+                context_parts.append(f"\n- **{title}**\n  {content}...")
+
+        user_prompt = "\n".join(context_parts)
+
+        # Step 3: Call Claude API with the ring's specialized prompt
+        # Use Sonnet 4.5 for agent execution (complex task)
+        full_prompt = f"""{ring_prompt}
+
+---
+
+{user_prompt}
+
+Please provide a comprehensive analysis following your role as {ring.role}."""
+
+        response = await self._call_claude_api(
+            prompt=full_prompt,
+            complexity=0.9,  # Agent tasks are complex - use Sonnet
+            max_tokens=4000  # Allow longer responses for detailed analysis
+        )
+
+        if response:
+            logger.info(f"{ring.name} analysis complete ({len(response)} chars)")
+            return response
+        else:
+            # Fallback to simulation if API call fails
+            logger.error(f"Failed to get response from {ring.name}, falling back to simulation")
+            return await self._simulate_ring_analysis(ring, task, knowledge)
+
     async def _simulate_ring_analysis(self, ring: Ring, task: str, knowledge: Optional[Dict]) -> str:
         """
-        Simulate ring analysis for Phase 1.
-        In Phase 2, this will actually spawn agents via work orders.
+        Simulate ring analysis (fallback for Phase 1 compatibility).
+
+        This is only used if:
+        - Ring prompt file is missing
+        - Claude API fails
+        - User explicitly wants simulation
         """
         # For now, return a JARVIS-style acknowledgment that the agent would be consulted
         return f"Based on my analysis, I would recommend consulting with the {ring.role} specialist for detailed guidance on: {task}. This agent specializes in {', '.join(ring.capabilities)}."
